@@ -1,25 +1,123 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
-import * as vscode from 'vscode';
+import * as vscode from "vscode";
+import { parse } from "@babel/parser";
+import { CommentBlock, CommentLine } from "@babel/types";
 
-// this method is called when your extension is activated
-// your extension is activated the very first time the command is executed
+const extensions = ["ts", "tsx", "js", "jsx"];
+
+function isCommentLine(
+  comment: CommentLine | CommentBlock | undefined
+): comment is CommentLine {
+  return comment?.type === "CommentLine";
+}
+
+function isCommentBlock(
+  comment: CommentLine | CommentBlock | undefined
+): comment is CommentBlock {
+  return comment?.type === "CommentBlock";
+}
+
+function isFollowingLine(a: CommentLine, b: CommentLine): boolean {
+  return a.loc.end.line + 1 === b.loc.start.line;
+}
+
+export function wrapText(text: string, lineLength: number): string[] {
+  if (text.length <= lineLength) {
+    return [text];
+  }
+
+  // Find breakpoint nearest to end of line
+  let breakIndex = text.slice(0, lineLength).lastIndexOf(" ");
+
+  // Look for nearest break past line limit if none found within limits
+  if (breakIndex === -1) {
+    breakIndex = text.indexOf(" ");
+  }
+
+  // Do not break if breakpoint can't be found
+  if (breakIndex === -1) {
+    return [text];
+  }
+
+  return [
+    text.slice(0, breakIndex),
+    ...wrapText(text.slice(breakIndex + 1), lineLength),
+  ];
+}
+
+export function formatComments(document: vscode.TextDocument) {
+  const lineLength: number =
+    vscode.workspace
+      .getConfiguration("vscode-wrap-comments")
+      .get("lineLength") ?? 80;
+  const ast = parse(document.getText());
+  const lineCommentGroups: CommentLine[][] = [];
+  const blockComments: CommentBlock[] = [];
+
+  if (!ast.comments) {
+    return null;
+  }
+
+  let group: CommentLine[] = [];
+  let prev: CommentLine | CommentBlock | undefined;
+  // TODO: this logic is a real mess. Clean up or at least extract it into
+  // a function where I don't have to look at it >_<
+  for (const comment of ast.comments) {
+    if (isCommentLine(comment)) {
+      if (isCommentLine(prev) && isFollowingLine(prev, comment)) {
+        group.push(comment);
+      } else {
+        if (group.length) {
+          lineCommentGroups.push(group);
+        }
+        group = [comment];
+      }
+    }
+
+    if (isCommentBlock(comment)) {
+      blockComments.push(comment);
+    }
+
+    prev = comment;
+  }
+
+  // Add final group if leftover after iterations
+  if (group.length) {
+    lineCommentGroups.push(group);
+  }
+
+  const lineEdits = lineCommentGroups.map((group) => {
+    const lineCommentToken = "// ";
+    const indent = group[0].loc.start.column;
+    const lineBreakLimit = lineLength - indent - lineCommentToken.length;
+
+    const fullComment = group.map((line) => line.value.trim()).join(" ");
+    const lines = wrapText(fullComment, lineBreakLimit);
+    const newComment = lines
+      .map((line) => `${" ".repeat(indent)}${lineCommentToken}${line}`)
+      .join("\n");
+
+    // minus 1 because vscode lines start at zero and AST lines start at one.
+    const startLine = group[0].loc.start.line - 1;
+    const endLine = group[group.length - 1].loc.end.line - 1;
+
+    return vscode.TextEdit.replace(
+      new vscode.Range(
+        document.lineAt(startLine).range.start,
+        document.lineAt(endLine).range.end
+      ),
+      newComment
+    );
+  });
+
+  return lineEdits;
+}
+
 export function activate(context: vscode.ExtensionContext) {
-	
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "vscode-wrap-comments" is now active!');
+  const selector = [{ pattern: `*.{${extensions.join(",")}}`, scheme: "file" }];
 
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	let disposable = vscode.commands.registerCommand('vscode-wrap-comments.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from vscode-wrap-comments!');
-	});
-
-	context.subscriptions.push(disposable);
+  vscode.languages.registerDocumentFormattingEditProvider(selector, {
+    provideDocumentFormattingEdits: formatComments,
+  });
 }
 
 // this method is called when your extension is deactivated
